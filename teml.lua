@@ -51,11 +51,10 @@ local patterns = {
         local buff = ""
         local tmp_t = shallow_copy(t)
 
-        if type(t[iter]) == "table" then
-            for i,v in pairs(t[iter]) do
-                tmp_t[iter_var[1]] = i
-                tmp_t[iter_var[2]] = v
-                print(I(tmp_t))
+        if type(str_index(t,iter)) == "table" then
+            for i,v in pairs(str_index(t,iter)) do
+                tmp_t[iter_var[1] or "_"] = i
+                tmp_t[iter_var[2] or "_"] = v
                 buff = buff..teml(templ)(tmp_t)
             end
             return buff
@@ -68,12 +67,12 @@ local patterns = {
         local st,en,inc = (table.unpack or unpack)(sei)
         if st and en and inc then
             for i = st,en,inc do
-                tmp_t[iter_var[1]] = i
+                tmp_t[iter_var[1] or "_"] = i
                 buff = buff..teml(templ)(tmp_t)
             end
         else
             for i = st,en do
-                tmp_t[iter_var[1]] = i
+                tmp_t[iter_var[1] or "_"] = i
                 buff = buff..teml(templ)(tmp_t)
             end
         end
