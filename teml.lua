@@ -25,10 +25,13 @@ local function shallow_copy(t)
 end
 
 local function is_empty(str)
-    return str == "" or str:match("^%s+$")
+    return not str or str == "" or str:match("^%s+$")
 end
 
 local function is_number(str, integer)
+    if is_empty(str) then
+        return false
+    end
     if str == "0" then
         return true
     end
@@ -70,6 +73,15 @@ local function escape(str)
     return str:gsub("%p", "%%%1")
 end
 
+local function gen_error(line, err)
+    return ("line %d: %s"):format(line, err)
+end
+
+local function gen_func_error(line, func, err, argn)
+    return not argn and gen_error(line, ("%s: %s"):format(func, err))
+        or gen_error(line, ("%s: error on argument #%d (%s)"):format(func, argn, err))
+end
+
 local patterns = {
     -- For loop:
     -- `@for(<varname[,varname...]> : <<table-var> / <s>..<e>[..<i>]){<template>}`
@@ -83,9 +95,10 @@ local patterns = {
         function(p, s_iter, template)
             if is_empty(s_iter) then
                 return nil,
-                    "line "
-                        .. get_line(p.string, "@for%s*%(" .. s_iter .. "%)%s*{" .. template .. "}")
-                        .. ": for iter expression is empty."
+                    gen_error(
+                        get_line(p.string, "@for%s*%(" .. s_iter .. "%)%s*{" .. template .. "}"),
+                        "for iter expression is empty."
+                    )
             end
 
             s_iter = trim(s_iter)
@@ -144,16 +157,19 @@ local patterns = {
         function(p, comp_exp, template, alt_template)
             if is_empty(comp_exp) then
                 return nil,
-                    "line " .. get_line(
-                        p.string,
-                        "@if%s*%("
-                            .. escape(comp_exp)
-                            .. "%)%s*{"
-                            .. escape(template)
-                            .. "}%s*@else%s*{"
-                            .. alt_template
-                            .. "}"
-                    ) .. ": statement is empty."
+                    gen_error(
+                        get_line(
+                            p.string,
+                            "@if%s*%("
+                                .. escape(comp_exp)
+                                .. "%)%s*{"
+                                .. escape(template)
+                                .. "}%s*@else%s*{"
+                                .. alt_template
+                                .. "}"
+                        ),
+                        "statement is empty."
+                    )
             end
 
             local f = (load or loadstring)("return " .. teml(comp_exp)(p.table))
@@ -177,9 +193,10 @@ local patterns = {
         function(p, comp_exp, template)
             if is_empty(comp_exp) then
                 return nil,
-                    "line "
-                        .. get_line(p.string, "@if%s*%(" .. escape(comp_exp) .. "%)%s*{" .. escape(template) .. "}")
-                        .. ": statement is empty."
+                    gen_error(
+                        get_line(p.string, "@if%s*%(" .. escape(comp_exp) .. "%)%s*{" .. escape(template) .. "}"),
+                        "statement is empty."
+                    )
             end
 
             local f = (load or loadstring)("return " .. teml(comp_exp)(p.table))
@@ -194,13 +211,14 @@ local patterns = {
     -- Function call:
     -- `@<func-name>([arg1[,argn...]])`
     {
-        "@(%S+)%s*%((.-)%)",
+        "@(%S-)%s*%((.*)%)",
         ---@param p PropTable
         ---@param func string
         ---@param args string
         ---@return string?
         ---@return string?
         function(p, func, args)
+            args = teml(args)(p.table)
             local fn_args = {}
             for s in args:gmatch("([^,]+)") do
                 fn_args[#fn_args + 1] = teml(s)(p.table)
@@ -211,33 +229,56 @@ local patterns = {
             if type(teml.functions[func]) == "function" then
                 ret, err = teml.functions[func]((table.unpack or unpack)(fn_args))
                 err = err
-                    and "line "
-                        .. get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)")
-                        .. ": "
-                        .. func
-                        .. ": "
-                        .. err
+                    and gen_func_error(
+                        get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)"),
+                        func,
+                        err
+                    )
             else
                 local tmp_func = shallow_copy(teml.functions[func])
                 local tmp_lua_func = table.remove(tmp_func, 1)
 
                 local eval_args = {}
-                for i, param_type in ipairs(tmp_func) do
+                for i, v in ipairs(tmp_func) do
+                    local farg = fn_args[i]
+                    local param_type, param_optional = v:match("^(%l+)(%??)$")
+
                     if param_type == "integer" then
-                        err = not is_number(fn_args[i], true)
-                                and "line " .. get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)") .. ": " .. func .. ": error on argument #" .. i .. " (expected integer)"
+                        err = param_optional == ""
+                                and not is_number(farg, true)
+                                and gen_func_error(
+                                    get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)"),
+                                    func,
+                                    "expected integer",
+                                    i
+                                )
                             or nil
-                        eval_args[i] = not err and tonumber(fn_args[i]) or nil
+                        eval_args[i] = not err and tonumber(farg) or nil
                     elseif param_type == "number" then
-                        err = not is_number(fn_args[i])
-                                and "line " .. get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)") .. ": " .. func .. ": error on argument #" .. i .. " (expected number)"
+                        err = param_optional == ""
+                            or not is_number(farg) and gen_func_error(
+                                get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)"),
+                                func,
+                                "expected number",
+                                i
+                            )
                             or nil
-                        eval_args[i] = not err and tonumber(fn_args[i]) or nil
+                        eval_args[i] = not err and tonumber(farg) or nil
                     else
-                        eval_args[i] = fn_args[i]
+                        err = param_optional == ""
+                                and is_empty(farg)
+                                and gen_func_error(
+                                    get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)"),
+                                    func,
+                                    "expected value",
+                                    i
+                                )
+                            or nil
+                        eval_args[i] = not err and farg or nil
                     end
 
                     if err then
+                        L.info("test")
                         break
                     end
                 end
@@ -246,12 +287,11 @@ local patterns = {
                 ok, ret = pcall(tmp_lua_func, (table.unpack or unpack)(eval_args))
 
                 if not ok and not err and ret then
-                    err = "line "
-                        .. get_line(p.string, "@" .. func .. "%(" .. escape(args) .. "%)")
-                        .. ": "
-                        .. func
-                        .. ": "
-                        .. ret
+                    err = gen_func_error(
+                        get_line(p.string, "@" .. escape(func) .. "%(" .. escape(args) .. "%)"),
+                        func,
+                        ret
+                    )
                     ret = nil
                 end
             end
@@ -272,9 +312,10 @@ local patterns = {
         function(p, var_name, alt_string)
             if is_empty(var_name) then
                 return nil,
-                    "line "
-                        .. get_line(p.string, "${" .. escape(var_name) .. ":%-" .. escape(alt_string) .. "}")
-                        .. ": empty variable name."
+                    gen_error(
+                        get_line(p.string, "${" .. escape(var_name) .. ":%-" .. escape(alt_string) .. "}"),
+                        "empty variable name."
+                    )
             end
 
             return str_index(p.table, var_name) or alt_string
@@ -293,9 +334,10 @@ local patterns = {
         function(p, var_name, set_string)
             if is_empty(var_name) then
                 return nil,
-                    "line "
-                        .. get_line(p.string, "${" .. escape(var_name) .. ":%+" .. escape(set_string) .. "}")
-                        .. ": empty variable name."
+                    gen_error(
+                        get_line(p.string, "${" .. escape(var_name) .. ":%+" .. escape(set_string) .. "}"),
+                        "empty variable name."
+                    )
             end
 
             return str_index(p.table, var_name) and set_string
@@ -322,7 +364,7 @@ local patterns = {
         ---@return string?
         function(p, var_name)
             if is_empty(var_name) then
-                return nil, "line " .. get_line(p.string, "${" .. escape(var_name) .. "}") .. ": empty variable name."
+                return nil, gen_error(get_line(p.string, "${" .. escape(var_name) .. "}"), "empty variable name.")
             end
 
             return str_index(p.table, var_name)
@@ -331,19 +373,13 @@ local patterns = {
 }
 
 local functions = {
-    ["string.rep"] = { string.rep, "string", "number", "string" },
-    ["string.reverse"] = function(str)
-        return str:reverse()
-    end,
-    ["string.sub"] = function(str, i, j)
-        if not i or i:match("^[^-+]?%D+$") then
-            return nil, "error on argument #2 (expected integer)"
-        end
-        if j and j:match("^[^-+]?%D+$") then
-            return nil, "error on argument #3 (expected integer)"
-        end
-        return str:sub(tonumber(i), j and tonumber(j))
-    end,
+    ["string.rep"] = { string.rep, "string", "integer", "string?" },
+    ["string.reverse"] = { string.reverse, "string" },
+    ["string.sub"] = { string.sub, "string", "integer", "integer?" },
+    ["string.len"] = { string.len, "string" },
+    ["string.upper"] = { string.upper, "string" },
+    ["string.lower"] = { string.lower, "string" },
+    ["string.byte"] = { string.byte, "string", "integer?", "integer?" },
 }
 
 teml.patterns = patterns
