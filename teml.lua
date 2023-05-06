@@ -1,5 +1,27 @@
-local L = require("log")
-local I = require("inspect")
+--
+-- teml
+--
+-- Copyright (c) 2023 UrNightmaree
+--
+-- Permission is hereby granted, free of charge, to any person obtaining a copy
+-- of this software and associated documentation files (the "Software"), to deal
+-- in the Software without restriction, including without limitation the rights
+-- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-- copies of the Software, and to permit persons to whom the Software is
+-- furnished to do so, subject to the following conditions:
+--
+-- The above copyright notice and this permission notice shall be included in all
+-- copies or substantial portions of the Software.
+--
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+-- SOFTWARE.
+--
+
 local teml = setmetatable({}, {
     __call = function(self, str)
         return self.eval(str)
@@ -86,7 +108,7 @@ local patterns = {
     -- For loop:
     -- `@for(<varname[,varname...]> : <<table-var> / <s>..<e>[..<i>]){<template>}`
     {
-        "@for%s*%((.-)%)%s*{(.-)}",
+        "@for%s*%(([^)]-)%)%s*{([^}]-)}",
         ---@param p PropTable
         ---@param string_iter string
         ---@param template string
@@ -104,7 +126,7 @@ local patterns = {
             string_iter = trim(string_iter)
 
             local iter_variable, iter = {}, nil
-            string_iter:gsub("(.+)[ ]*:[ ]*(.+)", function(c1, c2)
+            string_iter:gsub("(%S+)[ ]*:[ ]*(%S+)", function(c1, c2)
                 iter = c2
                 for s in c1:gmatch("([^,]+)") do
                     iter_variable[#iter_variable + 1] = s
@@ -114,7 +136,12 @@ local patterns = {
             local buffer = ""
             local tmp_table = shallow_copy(p.table)
 
-            if type(str_index(p.table, iter)) == "table" then
+            local sei_variable = {}
+            for v in iter:gmatch("([^..]+)") do
+                sei_variable[#sei_variable + 1] = tonumber(v)
+            end
+
+            if #sei_variable < 2 and type(str_index(p.table, iter)) == "table" then
                 for i, v in pairs(str_index(p.table, iter)) do
                     tmp_table[iter_variable[1] or ""] = i
                     tmp_table[iter_variable[2] or ""] = v
@@ -123,13 +150,9 @@ local patterns = {
                 return buffer
             end
 
-            local sei_variable = {}
-            for v in iter:gmatch("([^..]+)") do
-                sei_variable[#sei_variable + 1] = tonumber(v)
-            end
-
             local start_var, end_var, increase_var = (table.unpack or unpack)(sei_variable)
             if start_var and end_var and increase_var then
+                print("a")
                 for i = start_var, end_var, increase_var do
                     tmp_table[iter_variable[1] or ""] = i
                     buffer = buffer .. teml(template)(tmp_table)
@@ -147,7 +170,7 @@ local patterns = {
     -- If-else statement:
     -- `@if(<<template>+<comp>>){<template>}@else(<alt-template>)
     {
-        "@if%s*%((.-)%)%s*{(.-)}%s*@else%s*{(.-)}",
+        "@if%s*%(([^)]-)%)%s*{([^}]-)}%s*@else%s*{([^}]-)}",
         ---@param p PropTable
         ---@param logical_exp string
         ---@param template string
@@ -184,7 +207,7 @@ local patterns = {
     -- If statement:
     -- `@if(<<template>+<comp>>){<template>}`
     {
-        "@if%s*%((.-)%)%s*{(.-)}",
+        "@if%s*%(([^}]-)%)%s*{([^}]-)}",
         ---@param p PropTable
         ---@param logical_exp string
         ---@param template string
@@ -211,11 +234,11 @@ local patterns = {
     -- Function call:
     -- `@<func-name>([arg1[,argn...]])`
     {
-        "@(%S-)%s*%((.*)%)",
+        "&(%S-)%s*%(([^)]-)%)",
         ---@param p PropTable
         ---@param func_name string
         ---@param args string
-        ---@return string?
+        ---@return any?
         ---@return string?
         function(p, func_name, args)
             args = teml(args)(p.table)
@@ -227,14 +250,25 @@ local patterns = {
             local ret, err
 
             if type(teml.functions[func_name]) == "function" then
-                ret, err = teml.functions[func_name]((table.unpack or unpack)(fn_args))
-                err = err
-                    and gen_func_error(
-                        get_line(p.string, "@" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                local ok
+                ---@diagnostic disable-next-line:param-type-mismatch
+                ok, ret, err = pcall(teml.functions[func_name], p, (table.unpack or unpack)(fn_args))
+
+                if not ok and ret then
+                    err = gen_func_error(
+                        get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                        func_name,
+                        ret
+                    )
+                    ret = nil
+                else
+                    err = gen_func_error(
+                        get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
                         func_name,
                         err
                     )
-            else
+                end
+            elseif type(teml.functions[func_name]) == "table" then
                 local table_func = shallow_copy(teml.functions[func_name])
                 local func = table.remove(table_func, 1)
 
@@ -247,7 +281,7 @@ local patterns = {
                         err = param_optional == ""
                                 and not is_number(farg, true)
                                 and gen_func_error(
-                                    get_line(p.string, "@" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                                    get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
                                     func_name,
                                     "expected integer",
                                     i
@@ -257,7 +291,7 @@ local patterns = {
                     elseif param_type == "number" then
                         err = param_optional == ""
                             or not is_number(farg) and gen_func_error(
-                                get_line(p.string, "@" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                                get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
                                 func_name,
                                 "expected number",
                                 i
@@ -268,7 +302,7 @@ local patterns = {
                         err = param_optional == ""
                                 and is_empty(farg)
                                 and gen_func_error(
-                                    get_line(p.string, "@" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                                    get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
                                     func_name,
                                     "expected value",
                                     i
@@ -278,7 +312,6 @@ local patterns = {
                     end
 
                     if err then
-                        L.info("test")
                         break
                     end
                 end
@@ -288,12 +321,17 @@ local patterns = {
 
                 if not ok and not err and ret then
                     err = gen_func_error(
-                        get_line(p.string, "@" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                        get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
                         func_name,
                         ret
                     )
                     ret = nil
                 end
+            else
+                err = gen_error(
+                    get_line(p.string, "&" .. escape(func_name) .. "%(" .. escape(args) .. "%)"),
+                    "calling a non-exist function."
+                )
             end
 
             return ret, err
@@ -303,7 +341,7 @@ local patterns = {
     -- Use string B if variable A unset:
     -- `${<variable-A>:-<string-B>}`
     {
-        "${(.-):%-(.-)}",
+        "${(.*):%-([^}]-)}",
         ---@param p PropTable
         ---@param variable_name string
         ---@param alt_string string
@@ -325,7 +363,7 @@ local patterns = {
     -- Use string B if variable A set:
     -- `${<variable-A>:+<string-B>}`
     {
-        "${(.-):%+(.-)}",
+        "${(.*):%+([^}]-)}",
         ---@param p PropTable
         ---@param variable_name string
         ---@param set_string string
@@ -344,20 +382,9 @@ local patterns = {
         end,
     },
 
-    -- Variable: `$<var-name>`
-    {
-        "$(%w+)",
-        ---@param p PropTable
-        ---@param variable_name string
-        ---@return any
-        function(p, variable_name)
-            return str_index(p.table, variable_name)
-        end,
-    },
-
     -- Enclosed variable `${<var-name>}`
     {
-        "${(.-)}",
+        "${([^}]-)}",
         ---@param p PropTable
         ---@param variable_name string
         ---@return any?
@@ -367,6 +394,17 @@ local patterns = {
                 return nil, gen_error(get_line(p.string, "${" .. escape(variable_name) .. "}"), "empty variable name.")
             end
 
+            return str_index(p.table, variable_name)
+        end,
+    },
+
+    -- Variable: `$<var-name>`
+    {
+        "$([._%w]-)",
+        ---@param p PropTable
+        ---@param variable_name string
+        ---@return any
+        function(p, variable_name)
             return str_index(p.table, variable_name)
         end,
     },
@@ -380,6 +418,9 @@ local functions = {
     ["string.upper"] = { string.upper, "string" },
     ["string.lower"] = { string.lower, "string" },
     ["string.byte"] = { string.byte, "string", "integer?", "integer?" },
+    ["exist"] = function(p, variable)
+        return p.table[variable] ~= nil
+    end,
 }
 
 teml.patterns = patterns
@@ -392,8 +433,8 @@ function teml.eval(str)
     ---@field pattern string
     local prop = { string = str }
 
-    return function(...)
-        prop.table = select("#", ...) > 1 and { ... } or select(1, ...)
+    return function(tbl)
+        prop.table = tbl
 
         local err
         for _, v in ipairs(patterns) do
